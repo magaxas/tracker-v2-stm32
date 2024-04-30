@@ -36,9 +36,6 @@ typedef struct  {
  char date[11];
  char NS, EW;
  char latitude[12], longitude[12];
- float batteryVoltage;
- float accelerometerData[3];
- uint8_t satNum;
 } DataPacket;
 
 typedef enum {
@@ -58,12 +55,11 @@ typedef enum {
 #define DEVICE_ID 1
 #define EVENT_ID 1
 #define AUTHORIZATION_TOKEN "KPOm4KIpIQHwh0Q7xdFo9Hh0ijO6nKnb"
-#define DATA_SEND_PERIOD 60 // max 120 seconds
+#define DATA_SEND_PERIOD 120 // max 120 seconds
 
 #define CMD_MAX_LEN 200
-#define DATA_BUF_MAX_LEN 4500
+#define DATA_BUF_MAX_LEN 5500
 
-#define GSM_MESSAGE_BUFFER_MAX_LENGTH 100
 #define UART_TIMEOUT 10
 #define ADC_TIMEOUT 100
 
@@ -90,9 +86,7 @@ SPI_HandleTypeDef hspi1;
 TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart2;
 DMA_HandleTypeDef hdma_usart1_rx;
-DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
 uint8_t buf[BUF_MAX_LEN] = {0};
@@ -136,7 +130,6 @@ static void MX_ADC_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_USART2_UART_Init(void);
 static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 
@@ -281,8 +274,12 @@ void init()
   }
 }
 
-void add_packet_to_sd_card(uint8_t idx)
+void add_packet_to_sd_card(uint8_t idx, uint8_t satNum)
 {
+  float accelerometerData[3];
+  LIS2DW12_ReadXYZ(accelerometerData);
+  float vbat = getBatteryVoltage();
+
   sprintf(
       (char *)buf,
       "%s %s,%.6f,%.6f,%.3f,%.2f,%.2f,%.2f,%d\n",
@@ -290,11 +287,11 @@ void add_packet_to_sd_card(uint8_t idx)
       data_packets[idx].EET_Time,
       convertToDecimalDegrees(data_packets[idx].latitude, data_packets[idx].NS),
       convertToDecimalDegrees(data_packets[idx].longitude, data_packets[idx].EW),
-      data_packets[idx].batteryVoltage,
-      data_packets[idx].accelerometerData[0],
-      data_packets[idx].accelerometerData[1],
-      data_packets[idx].accelerometerData[2],
-      data_packets[idx].satNum
+      vbat,
+      accelerometerData[0],
+      accelerometerData[1],
+      accelerometerData[2],
+      satNum
   );
 
   //Open the file
@@ -345,36 +342,6 @@ void send_data()
   strcat(data, "dates=");
   for (uint8_t i = 0; i < dp_idx+1; i++) {
     sprintf((char *)buf, "%s %s", data_packets[i].date, data_packets[i].EET_Time);
-    append_data_buf(i, true);
-  }
-
-  strcat(data, "batteryVoltages=");
-  for (uint8_t i = 0; i < dp_idx+1; i++) {
-    sprintf((char *)buf, "%.3f", data_packets[i].batteryVoltage);
-    append_data_buf(i, true);
-  }
-
-  strcat(data, "accelX=");
-  for (uint8_t i = 0; i < dp_idx+1; i++) {
-    sprintf((char *)buf, "%.2f", data_packets[i].accelerometerData[0]);
-    append_data_buf(i, true);
-  }
-
-  strcat(data, "accelY=");
-  for (uint8_t i = 0; i < dp_idx+1; i++) {
-    sprintf((char *)buf, "%.2f", data_packets[i].accelerometerData[1]);
-    append_data_buf(i, true);
-  }
-
-  strcat(data, "accelZ=");
-  for (uint8_t i = 0; i < dp_idx+1; i++) {
-    sprintf((char *)buf, "%.2f", data_packets[i].accelerometerData[2]);
-    append_data_buf(i, true);
-  }
-
-  strcat(data, "satNum=");
-  for (uint8_t i = 0; i < dp_idx+1; i++) {
-    sprintf((char *)buf, "%d", data_packets[i].satNum);
     append_data_buf(i, false);
   }
 
@@ -425,7 +392,6 @@ int main(void)
   MX_I2C1_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
-  MX_USART2_UART_Init();
   MX_TIM6_Init();
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
@@ -463,6 +429,7 @@ int main(void)
       case LONG_PRESS:
         BLINK_LED(RED_LED_GPIO_Port, RED_LED_Pin, 1, 1000);
         if (dp_idx > 0) {
+          --dp_idx;
           send_data();
         }
         module_power_down();
@@ -498,6 +465,7 @@ int main(void)
           char *delimiter = "\r\n";
           token = strtok((char*)buf+skip+1, delimiter);
           if (token != 0) {
+            uint8_t satNum = 0;
             char *token2;
             token2 = strtok(token, ","); //First token is UTC time
             for (uint8_t i = 1; i < 14; i++) { //last item we need has 13th index
@@ -521,7 +489,7 @@ int main(void)
                 formatDate(token2, data_packets[dp_idx].date);
                 break;
               case 13: /* Number of satellites */
-                data_packets[dp_idx].satNum = (uint8_t) strtol(token2, NULL, 10);
+                satNum = (uint8_t) strtol(token2, NULL, 10);
                 break;
               }
               token2 = strtok(NULL, ",");
@@ -536,9 +504,7 @@ int main(void)
               err_code = 2; // invalid data packet
             }
             else {
-              LIS2DW12_ReadXYZ(data_packets[dp_idx].accelerometerData);
-              data_packets[dp_idx].batteryVoltage = getBatteryVoltage();
-              add_packet_to_sd_card(dp_idx);
+              add_packet_to_sd_card(dp_idx, satNum);
 
               if (dp_idx+1 >= DATA_SEND_PERIOD) {
                 send_ready = 1;
@@ -614,10 +580,8 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART1|RCC_PERIPHCLK_USART2
-                              |RCC_PERIPHCLK_I2C1;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART1|RCC_PERIPHCLK_I2C1;
   PeriphClkInit.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK2;
-  PeriphClkInit.Usart2ClockSelection = RCC_USART2CLKSOURCE_PCLK1;
   PeriphClkInit.I2c1ClockSelection = RCC_I2C1CLKSOURCE_PCLK1;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
@@ -841,41 +805,6 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
-  * @brief USART2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART2_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-  /* USER CODE BEGIN USART2_Init 1 */
-
-  /* USER CODE END USART2_Init 1 */
-  huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
-  huart2.Init.WordLength = UART_WORDLENGTH_8B;
-  huart2.Init.StopBits = UART_STOPBITS_1;
-  huart2.Init.Parity = UART_PARITY_NONE;
-  huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART2_Init 2 */
-
-  /* USER CODE END USART2_Init 2 */
-
-}
-
-/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -888,9 +817,6 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel2_3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel2_3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
-  /* DMA1_Channel4_5_6_7_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel4_5_6_7_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Channel4_5_6_7_IRQn);
 
 }
 
