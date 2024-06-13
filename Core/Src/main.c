@@ -39,11 +39,6 @@ typedef struct  {
 } DataPacket;
 
 typedef enum {
-    PRESSED,
-    RELEASED
-} ButtonState;
-
-typedef enum {
     NO_PRESS,
     SINGLE_PRESS,
     LONG_PRESS
@@ -61,14 +56,6 @@ typedef enum {
 #define DATA_BUF_MAX_LEN 5500
 
 #define UART_TIMEOUT 10
-#define ADC_TIMEOUT 100
-
-// Accelerometer define
-#define LIS2DW12_ADDRESS 0x33
-#define LIS2DW12_CTRL1 0x20
-#define LIS2DW12_CTRL2 0x21
-#define LIS2DW12_CTRL6 0x25
-#define LIS2DW12_OUT_X_L 0x28
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -96,9 +83,9 @@ static char cmd[CMD_MAX_LEN] = {0};
 static uint8_t send_ready = 0;
 static uint8_t send_done = 1;
 static uint8_t gnss_data_ready = 0;
-static uint8_t cmd_fail = 0;
 
-static uint8_t dp_idx = 0; // data packets max index
+static uint8_t satNum = 0;
+static uint8_t dp_idx = 0; // data packets index
 static DataPacket data_packets[DATA_SEND_PERIOD];
 static char data[DATA_BUF_MAX_LEN] = {0};
 
@@ -109,7 +96,6 @@ static const uint32_t LONG_MILLIS_MAX = 10000;
 
 static uint32_t last_up_ts = 0;
 static uint32_t last_down_ts = 0;
-static ButtonState btn_state = RELEASED;
 static ButtonEvent btn_event = NO_PRESS;
 
 // STOP mode flags
@@ -146,21 +132,18 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
      HAL_ResumeTick();
      enter_stop_mode = false;
      exit_stop_mode  = true;
-     btn_state = RELEASED;
      return;
    }
 
    uint32_t now = HAL_GetTick();
-   if (btn_state == RELEASED && HAL_GPIO_ReadPin(PUSH_BTN_GPIO_Port, PUSH_BTN_Pin) == GPIO_PIN_RESET) {
-     btn_state = PRESSED;
+   if (HAL_GPIO_ReadPin(PUSH_BTN_GPIO_Port, PUSH_BTN_Pin) == GPIO_PIN_RESET) {
      last_down_ts = now;
    }
-   else if (btn_state == PRESSED) {
+   else {
      last_up_ts = now;
 
      uint32_t diff = last_up_ts - last_down_ts;
      if (diff > DEBOUNCE_MILLIS) { // Handle debounce
-       btn_state = RELEASED;
 
        if (diff < LONG_MILLIS_MIN) {
          btn_event = SINGLE_PRESS;
@@ -170,11 +153,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
        }
        else {
          btn_event = NO_PRESS;
-         btn_state = RELEASED;
        }
-     }
-     else if (diff == 0) {
-       btn_state = RELEASED;
      }
    }
  }
@@ -188,51 +167,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef * htim)
   }
 }
 
-HAL_StatusTypeDef I2C_ReadMultiple(uint8_t Addr, uint8_t Reg, uint8_t *Buffer, uint16_t Length)
-{
-  return HAL_I2C_Mem_Read(&hi2c1, Addr, (uint16_t)Reg, I2C_MEMADD_SIZE_8BIT, Buffer, Length, 1000);
-}
-
-void I2C_Write(uint8_t Addr, uint8_t Reg, uint8_t Value)
-{
-  HAL_I2C_Mem_Write(&hi2c1, Addr, (uint16_t)Reg, I2C_MEMADD_SIZE_8BIT, (uint8_t*)&Value, 1, 1000);
-}
-
-void LIS2DW12_Init()
-{
-  I2C_Write(LIS2DW12_ADDRESS, LIS2DW12_CTRL1, 0x55);
-  I2C_Write(LIS2DW12_ADDRESS, LIS2DW12_CTRL2, 0x04);
-  I2C_Write(LIS2DW12_ADDRESS, LIS2DW12_CTRL6, 0x10);
-}
-
-void LIS2DW12_ReadXYZ(float *data)
-{
-  int16_t rawData[3];
-  uint8_t buffer[6];
-
-  /* Read 6 consecutive values from sensor: x,y,z (each is 2 bytes long) */
-  I2C_ReadMultiple(LIS2DW12_ADDRESS, LIS2DW12_OUT_X_L, buffer, 6);
-
-  uint8_t i = 0;
-  for (i = 0; i < 3; i++) {
-    rawData[i] = (((uint16_t)buffer[2*i+1]) << 8) + (uint16_t)buffer[2*i];
-  }
-
-  /* Convert according to sensitivity */
-  for (i = 0; i < 3; i++) {
-    data[i] = (float) ((rawData[i]) / 8393.4426f);
-  }
-}
-
-float getBatteryVoltage()
-{
-  HAL_ADC_Start(&hadc);
-  HAL_ADC_PollForConversion(&hadc, ADC_TIMEOUT);
-  uint32_t raw = HAL_ADC_GetValue(&hadc);
-  return (float)raw/4095.f * 3.3f * 1.28f;
-}
-
-void append_data_buf(uint8_t idx, bool append_last)
+void appendDataBuf(uint8_t idx, bool append_last)
 {
   strcat((char*)data, (char*)buf);
 
@@ -254,15 +189,16 @@ void init()
     BLINK_LED(RED_LED_GPIO_Port, RED_LED_Pin, 3, 200);
   }
 
-  //Setup GNSS XTRA
-  bool en_xtra_ok = send_at_cmd("AT+QGPSXTRA=1\r\n");
-  bool en_xtra_auto_dwnld_ok = send_at_cmd("AT+QGPSCFG=\"xtra_autodownload\",1\r\n");
-
   // Set HTTP URL
   sprintf(cmd, "AT+QHTTPURL=%d\r\n", strlen(url));
   bool set_url_ok = send_at_connect_cmd(cmd, url, NULL, NULL, 5);
   // Configure GNSS Constellations (GPS + Galileo)
   bool gnss_config_ok = send_at_cmd("AT+QGPSCFG=\"gnssconfig\",3\r\n");
+
+  //Setup GNSS XTRA
+  bool en_xtra_ok = send_at_cmd("AT+QGPSXTRA=1\r\n");
+  bool en_xtra_auto_dwnld_ok = send_at_cmd("AT+QGPSCFG=\"xtra_autodownload\",1\r\n");
+
   // Turn on GNSS
   bool gnss_on_ok = send_at_cmd("AT+QGPS=1\r\n");
 
@@ -274,7 +210,7 @@ void init()
   }
 }
 
-void add_packet_to_sd_card(uint8_t idx, uint8_t satNum)
+void add_packet_to_sd_card()
 {
   float accelerometerData[3];
   LIS2DW12_ReadXYZ(accelerometerData);
@@ -283,10 +219,10 @@ void add_packet_to_sd_card(uint8_t idx, uint8_t satNum)
   sprintf(
       (char *)buf,
       "%s %s,%.6f,%.6f,%.3f,%.2f,%.2f,%.2f,%d\n",
-      data_packets[idx].date,
-      data_packets[idx].EET_Time,
-      convertToDecimalDegrees(data_packets[idx].latitude, data_packets[idx].NS),
-      convertToDecimalDegrees(data_packets[idx].longitude, data_packets[idx].EW),
+      data_packets[dp_idx].date,
+      data_packets[dp_idx].EET_Time,
+      convertToDecimalDegrees(data_packets[dp_idx].latitude, data_packets[dp_idx].NS),
+      convertToDecimalDegrees(data_packets[dp_idx].longitude, data_packets[dp_idx].EW),
       vbat,
       accelerometerData[0],
       accelerometerData[1],
@@ -330,19 +266,19 @@ void send_data()
   strcat(data, "latitudes=");
   for (uint8_t i = 0; i < dp_idx+1; i++) {
     sprintf((char *)buf, "%.6f", convertToDecimalDegrees(data_packets[i].latitude, data_packets[i].NS));
-    append_data_buf(i, true);
+    appendDataBuf(i, true);
   }
 
   strcat(data, "longitudes=");
   for (uint8_t i = 0; i < dp_idx+1; i++) {
     sprintf((char *)buf, "%.6f", convertToDecimalDegrees(data_packets[i].longitude, data_packets[i].EW));
-    append_data_buf(i, true);
+    appendDataBuf(i, true);
   }
 
   strcat(data, "dates=");
   for (uint8_t i = 0; i < dp_idx+1; i++) {
     sprintf((char *)buf, "%s %s", data_packets[i].date, data_packets[i].EET_Time);
-    append_data_buf(i, false);
+    appendDataBuf(i, false);
   }
 
   // Send HTTP POST
@@ -355,10 +291,82 @@ void send_data()
   }
 
   send_at_cmd("AT+QGPSCFG=\"priority\",0\r\n"); // Set GNSS priority
-  cmd_fail = 0;
   dp_idx = 0;
   send_done = 1;
 }
+
+uint8_t parse_gnss_data()
+{
+  uint8_t err_code = 5; // unknown
+
+  if (strstrn((char *)buf, "ERROR", BUF_MAX_LEN) != NULL) {
+    err_code = 1; // waiting for position fix
+  }
+  else if (strstrn((char *)buf, "QGPSLOC", BUF_MAX_LEN) != NULL) {
+    err_code = 0;
+    // Start parsing GNSS data
+    uint16_t skip = 0;
+    while (buf[skip] != ' ') {
+      if (skip+1 >= BUF_MAX_LEN) break;
+      skip++;
+    }
+
+    if (skip+10 != BUF_MAX_LEN) {
+      char *token = NULL;
+      char *delimiter = "\r\n";
+      token = strtok((char*)buf+skip+1, delimiter);
+      if (token != 0) {
+        char *token2;
+        token2 = strtok(token, ","); //First token is UTC time
+        for (uint8_t i = 1; i < 14; i++) { //last item we need has 13th index
+          switch(i) {
+          case 1: /* UTC time */
+            convertUTCtoEET(token2, data_packets[dp_idx].EET_Time);
+            break;
+          case 2: /* Raw latitude */
+            strcpy(data_packets[dp_idx].latitude, token2);
+            break;
+          case 3: /* N/S */
+            data_packets[dp_idx].NS = (char) token2[0];
+            break;
+          case 4: /* Raw longtitude */
+            strcpy(data_packets[dp_idx].longitude, token2);
+            break;
+          case 5: /* E/W */
+            data_packets[dp_idx].EW = (char) token2[0];
+            break;
+          case 12: /* date */
+            formatDate(token2, data_packets[dp_idx].date);
+            break;
+          case 13: /* Number of satellites */
+            satNum = (uint8_t) strtol(token2, NULL, 10);
+            break;
+          }
+          token2 = strtok(NULL, ",");
+        }
+
+        if (strcmp(data_packets[dp_idx].date, "0000-00-00") == 0 ||
+            strcmp(data_packets[dp_idx].EET_Time, "00:00:00") == 0 ||
+            valid_number(data_packets[dp_idx].latitude) == 0 ||
+            valid_number(data_packets[dp_idx].longitude) == 0 ||
+            convertToDecimalDegrees(data_packets[dp_idx].latitude, data_packets[dp_idx].NS) == 0.f ||
+            convertToDecimalDegrees(data_packets[dp_idx].longitude, data_packets[dp_idx].EW) == 0.f ||
+            satNum == 0) {
+          err_code = 2; // invalid data packet
+        }
+      }
+      else {
+        err_code = 3; // parsing error: strtok failed by \r\n
+      }
+    }
+    else {
+      err_code = 4; // parsing error: didn't find space char in buffer
+    }
+  }
+
+  return err_code;
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -442,89 +450,25 @@ int main(void)
     }
 
     if (gnss_data_ready == 1) {
-      uint8_t err_code = 0; // 0 = success
       memset(buf, 0, sizeof(buf));
       sprintf(cmd, "AT+QGPSLOC=1\r\n");
       HAL_UART_Transmit(&huart1, (uint8_t*)cmd, strlen(cmd), 100);
       HAL_UART_Receive_DMA(&huart1, buf, BUF_MAX_LEN);
       HAL_Delay(100);
 
-      if (strstrn((char *)buf, "ERROR", BUF_MAX_LEN) != NULL) {
-        err_code = 1; // waiting for position fix
-      }
-      else if (strstrn((char *)buf, "QGPSLOC", BUF_MAX_LEN) != NULL) {
-        // Parse GNSS data
-        uint16_t skip = 0;
-        while (buf[skip] != ' ') {
-          if (skip+1 == BUF_MAX_LEN) break;
-          skip++;
-        }
+      uint8_t err_code = parse_gnss_data();
+      if (err_code == 0) {
+        add_packet_to_sd_card();
 
-        if (skip+10 != BUF_MAX_LEN) {
-          char *token = NULL;
-          char *delimiter = "\r\n";
-          token = strtok((char*)buf+skip+1, delimiter);
-          if (token != 0) {
-            uint8_t satNum = 0;
-            char *token2;
-            token2 = strtok(token, ","); //First token is UTC time
-            for (uint8_t i = 1; i < 14; i++) { //last item we need has 13th index
-              switch(i) {
-              case 1: /* UTC time */
-                convertUTCtoEET(token2, data_packets[dp_idx].EET_Time);
-                break;
-              case 2: /* Raw latitude */
-                strcpy(data_packets[dp_idx].latitude, token2);
-                break;
-              case 3: /* N/S */
-                data_packets[dp_idx].NS = (char) token2[0];
-                break;
-              case 4: /* Raw longtitude */
-                strcpy(data_packets[dp_idx].longitude, token2);
-                break;
-              case 5: /* E/W */
-                data_packets[dp_idx].EW = (char) token2[0];
-                break;
-              case 12: /* date */
-                formatDate(token2, data_packets[dp_idx].date);
-                break;
-              case 13: /* Number of satellites */
-                satNum = (uint8_t) strtol(token2, NULL, 10);
-                break;
-              }
-              token2 = strtok(NULL, ",");
-            }
-
-            if (strcmp(data_packets[dp_idx].date, "0000-00-00") == 0 ||
-                strcmp(data_packets[dp_idx].EET_Time, "00:00:00") == 0 ||
-                valid_number(data_packets[dp_idx].latitude) == 0 ||
-                valid_number(data_packets[dp_idx].longitude) == 0 ||
-                convertToDecimalDegrees(data_packets[dp_idx].latitude, data_packets[dp_idx].NS) == 0.f ||
-                convertToDecimalDegrees(data_packets[dp_idx].longitude, data_packets[dp_idx].EW) == 0.f) {
-              err_code = 2; // invalid data packet
-            }
-            else {
-              add_packet_to_sd_card(dp_idx, satNum);
-
-              if (dp_idx+1 >= DATA_SEND_PERIOD) {
-                send_ready = 1;
-              }
-              else {
-                ++dp_idx;
-              }
-            }
-          }
-          else {
-            err_code = 3; // parsing error: strtok failed by \r\n
-          }
+        if (dp_idx+1 >= DATA_SEND_PERIOD) {
+          send_ready = 1;
         }
         else {
-          err_code = 4; // parsing error: didn't find space char in buffer
+          ++dp_idx;
         }
       }
 
-      // if success or waiting for position fix
-      if (err_code == 0 || err_code == 1) {
+      if (err_code == 0 || err_code == 1) { // if success or waiting for position fix
         gnss_data_ready = 0;
       }
 

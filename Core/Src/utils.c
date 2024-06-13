@@ -1,6 +1,32 @@
 #include "utils.h"
 
 
+void LIS2DW12_Init()
+{
+  I2C_Write(LIS2DW12_ADDRESS, LIS2DW12_CTRL1, 0x55);
+  I2C_Write(LIS2DW12_ADDRESS, LIS2DW12_CTRL2, 0x04);
+  I2C_Write(LIS2DW12_ADDRESS, LIS2DW12_CTRL6, 0x10);
+}
+
+void LIS2DW12_ReadXYZ(float *data)
+{
+  int16_t rawData[3];
+  uint8_t buffer[6];
+
+  /* Read 6 consecutive values from sensor: x,y,z (each is 2 bytes long) */
+  I2C_ReadMultiple(LIS2DW12_ADDRESS, LIS2DW12_OUT_X_L, buffer, 6);
+
+  uint8_t i = 0;
+  for (i = 0; i < 3; i++) {
+    rawData[i] = (((uint16_t)buffer[2*i+1]) << 8) + (uint16_t)buffer[2*i];
+  }
+
+  /* Convert according to sensitivity */
+  for (i = 0; i < 3; i++) {
+    data[i] = (float) ((rawData[i]) / 8393.4426f);
+  }
+}
+
 void module_power_up()
 {
   BLINK_LED(GREEN_LED_GPIO_Port, GREEN_LED_Pin, 1, 1000);
@@ -309,4 +335,22 @@ void buck_boost_disable()
 {
   HAL_GPIO_WritePin(FPWM_EN_GPIO_Port, FPWM_EN_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(BUCK_BOOST_EN_GPIO_Port, BUCK_BOOST_EN_Pin, GPIO_PIN_RESET);
+}
+
+HAL_StatusTypeDef I2C_ReadMultiple(uint8_t Addr, uint8_t Reg, uint8_t *Buffer, uint16_t Length)
+{
+  return HAL_I2C_Mem_Read(&hi2c1, Addr, (uint16_t)Reg, I2C_MEMADD_SIZE_8BIT, Buffer, Length, 1000);
+}
+
+void I2C_Write(uint8_t Addr, uint8_t Reg, uint8_t Value)
+{
+  HAL_I2C_Mem_Write(&hi2c1, Addr, (uint16_t)Reg, I2C_MEMADD_SIZE_8BIT, (uint8_t*)&Value, 1, 1000);
+}
+
+float getBatteryVoltage()
+{
+  HAL_ADC_Start(&hadc);
+  HAL_ADC_PollForConversion(&hadc, ADC_TIMEOUT);
+  uint32_t raw = HAL_ADC_GetValue(&hadc);
+  return (float)raw/4095.f * 3.3f * 1.28f;
 }

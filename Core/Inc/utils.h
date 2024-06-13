@@ -7,10 +7,25 @@
 #include <stdio.h>
 #include <stdbool.h>
 
+#define ADC_TIMEOUT 100
+
+// Accelerometer define
+#define LIS2DW12_ADDRESS 0x33
+#define LIS2DW12_CTRL1 0x20
+#define LIS2DW12_CTRL2 0x21
+#define LIS2DW12_CTRL6 0x25
+#define LIS2DW12_OUT_X_L 0x28
+
+extern ADC_HandleTypeDef hadc;
+extern I2C_HandleTypeDef hi2c1;
 extern UART_HandleTypeDef huart1;
 extern uint8_t buf[BUF_MAX_LEN];
 
-// Functions for BG600L-M3 module
+// LIS2DW12 accelerometer
+void LIS2DW12_Init();
+void LIS2DW12_ReadXYZ(float *data);
+
+// BG600L-M3 module
 void module_power_up();
 void module_power_down();
 void module_turn_on();
@@ -20,9 +35,7 @@ bool send_at_cmd(char *cmd);
 /* Tries to execute cmd until gets CONNECT and
  * then sends data and retries cmd if
  * doesn't get OK answer */
-bool send_at_connect_cmd(
-    char *cmd, char *data, char *key, char *keyval, uint8_t max_cmd_retries
-);
+bool send_at_connect_cmd(char *cmd, char *data, char *key, char *keyval, uint8_t max_cmd_retries);
 
 // LED Controls
 void RED_LED_ON();
@@ -42,5 +55,10 @@ char *strstrn(const char *mainStr, const char *subStr, size_t mainStrSize);
 
 void buck_boost_enable();
 void buck_boost_disable();
+
+HAL_StatusTypeDef I2C_ReadMultiple(uint8_t Addr, uint8_t Reg, uint8_t *Buffer, uint16_t Length);
+void I2C_Write(uint8_t Addr, uint8_t Reg, uint8_t Value);
+
+float getBatteryVoltage();
 
 #endif /* INC_UTILS_H_ */
